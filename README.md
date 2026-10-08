@@ -1,24 +1,25 @@
-# Wendy MCP Partner Integration Guide
+# Wendy MCP Public Integration Guide
 
-Distribution classification: partner-facing; share only after commercial and security review.
+Distribution classification: public.
 
-Document version: 1.0  
-Response schema version: 1.2  
-Last updated: 2026-09-29
+- Document version: 1.1
+- Response schema version: 1.2
+- Last updated: 2026-10-08
 
 ## Purpose and scope
 
-Wendy exposes read-only market analytics to approved partners through the Model Context Protocol
-(MCP). This guide describes the public integration contract: how to connect, discover tools, make
-calls, interpret results, and handle failures.
+Wendy exposes deterministic market analytics and structured user preferences through the Model
+Context Protocol (MCP). This guide describes the production integration contract: how to connect,
+discover tools, make calls, interpret results, and handle failures.
 
 The service returns structured snapshot data. It does not place trades, select investments, or
 make recommendations. Calculation methods, source code, internal prompts, model coefficients,
 market-data sourcing, infrastructure, caching, operational thresholds, and security controls are
-proprietary and are not part of the partner contract.
+proprietary and are not part of the public contract.
 
-The live MCP `tools/list` response is authoritative for tool descriptions, input JSON Schemas,
-enums, defaults, and bounds.
+The live production MCP `tools/list` response is authoritative for tool descriptions, input JSON
+Schemas, enums, defaults, and bounds. The public production surface contains seven analytics
+tools plus `set_preferences`. Watch tools are not part of the production contract.
 
 ## Connection
 
@@ -26,39 +27,42 @@ Wendy uses MCP over Streamable HTTP.
 
 | Item | Value |
 |---|---|
-| Endpoint | Supplied during onboarding; it ends in `/mcp` |
-| Authentication | Credential and header scheme supplied during onboarding |
+| Endpoint | `https://mcp.wendy.trade/mcp` |
+| Transport | MCP Streamable HTTP |
+| Authentication | OAuth 2.1 authorization code flow with PKCE through WorkOS AuthKit |
 | Session model | Stateless; the client retains conversation state |
-| Tool behavior | Read-only, non-destructive, and idempotent for the same data snapshot |
+| Tool behavior | Analytics are read-only; `set_preferences` is an idempotent structured-state update |
 | Request format | MCP JSON-RPC, normally handled by an MCP SDK |
 
-Keep credentials in a server-side secret store. Never embed them in browser or mobile code, commit
-them to source control, or include them in support tickets and logs. Partners connect only through
-the endpoint issued during onboarding and are not given access to Wendy's internal infrastructure.
+MCP clients discover authorization through Wendy's RFC 9728 protected-resource metadata and the
+authorization server's OAuth metadata. The authorization flow uses PKCE and obtains a token for
+the Wendy resource. Wendy verifies the token and the account's `wendy_mcp` entitlement on every
+request.
 
-Depending on the agreed authentication profile, the issued credential is sent in one of these
-forms:
+Never embed access or refresh tokens in source code, commit them to source control, or include
+them in support tickets and logs. Clients connect only through the public endpoint and are not
+given access to Wendy's internal infrastructure.
 
-```http
-Authorization: Bearer <credential>
-```
-
-or
+Protected-resource discovery is public:
 
 ```http
-X-API-Key: <credential>
+GET https://mcp.wendy.trade/.well-known/oauth-protected-resource/mcp
 ```
 
-Use only the scheme assigned to your integration.
+Missing or invalid authorization on `/mcp` returns HTTP `401` with a standards-based
+`WWW-Authenticate` discovery challenge. Supported MCP clients complete OAuth in the user's
+browser and attach the resulting bearer token automatically. See the
+[Wendy connection guide](https://wendy.trade/connect) for client-specific setup.
 
 ## Quick start with Python
 
-Install the official MCP Python SDK, then set the endpoint and credential in the environment:
+For diagnostic or custom-client development, install the official MCP Python SDK and supply an
+OAuth access token obtained through an approved authorization-code flow:
 
 ```bash
 pip install mcp
-export WENDY_MCP_URL="https://partner-endpoint.example/mcp"
-export WENDY_MCP_TOKEN="replace-with-issued-credential"
+export WENDY_MCP_URL="https://mcp.wendy.trade/mcp"
+export WENDY_MCP_ACCESS_TOKEN="replace-with-short-lived-oauth-access-token"
 ```
 
 This example initializes a session, discovers the current schema, and makes one tool call:
@@ -73,7 +77,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 
 async def main() -> None:
-    headers = {"Authorization": f"Bearer {os.environ['WENDY_MCP_TOKEN']}"}
+    headers = {"Authorization": f"Bearer {os.environ['WENDY_MCP_ACCESS_TOKEN']}"}
 
     async with (
         streamablehttp_client(
@@ -108,8 +112,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-For an API-key profile, change the example header to
-`{"X-API-Key": os.environ["WENDY_MCP_TOKEN"]}`.
+This example does not implement browser authorization, refresh, or revocation. Production clients
+must implement the published OAuth discovery contract or use an MCP client that does so.
 
 ## Recommended client flow
 
@@ -300,12 +304,46 @@ Example arguments:
 }
 ```
 
+### `set_preferences`
+
+Stores structured customer preferences that Wendy can apply to later analytics calls. Use this
+tool only when the customer explicitly asks to remember, change, or clear a preference. Explicit
+arguments in a later analytics request always override a saved preset.
+
+- Required: `preferences`, containing at least one change
+- Supported settings: IANA display timezone, intraday equity session (`regular` or `extended`),
+  and up to 24 complete indicator presets
+- Clearing: `clear_timezone`, `clear_intraday_equity_session`, and
+  `remove_indicator_presets`
+- Replacement: `replace_indicator_presets` replaces the saved preset set; otherwise matching
+  entries are updated
+- Safety boundary: accepts structured settings only—never place passwords, tokens, prompts,
+  free text, account numbers, or trading positions in preferences
+
+Example arguments:
+
+```json
+{
+  "preferences": {
+    "timezone": "America/Chicago",
+    "intraday_equity_session": "regular",
+    "indicator_presets": [
+      {
+        "symbol": "SPY",
+        "indicator": {"type": "ema", "period": 20, "timeframe": "1d"}
+      }
+    ]
+  }
+}
+```
+
 ## Instruments and input conventions
 
-The general market tools accept equities, ETFs, supported cash indices, crypto pairs, and FX
-pairs. Option-dependent tools require a supported listed option chain. Futures are not part of the
-public contract. An otherwise valid component may be unavailable or inapplicable for a particular
-asset—for example, a cash index does not have trade volume.
+The general market tools accept equities, ETFs, the SPX cash index, crypto pairs, and FX pairs.
+SPX is currently the only cash index in the public production contract; NDX and RUT requests are
+rejected by the public gateway. Option-dependent tools require a supported listed option chain.
+Futures are not part of the public contract. An otherwise valid component may be unavailable or
+inapplicable for a particular asset—for example, a cash index does not have trade volume.
 
 Follow these conventions:
 
@@ -313,9 +351,9 @@ Follow these conventions:
 - Use ISO `YYYY-MM-DD` for expirations.
 - Use an ISO date/time with an explicit UTC offset, or epoch time, for historical `as_of` calls.
 - Do not send undeclared properties; nested input objects use strict schemas.
-- Do not send `rh_user_id` or another customer identifier. The partner gateway derives attribution
+- Do not send `rh_user_id` or another customer identifier. The public gateway derives attribution
   from the authenticated identity.
-- Do not put natural-language questions in tool arguments. The partner application or agent routes
+- Do not put natural-language questions in tool arguments. The client application or agent routes
   the question to a tool and sends structured arguments.
 
 ## Response contract
@@ -387,7 +425,8 @@ transport or protocol failures.
 | Signal | Meaning | Client action |
 |---|---|---|
 | HTTP `401` | Missing, expired, or invalid credential | Refresh or correct credentials; do not retry in a tight loop |
-| HTTP `429` | Request rate limit exceeded | Honor `Retry-After`, add jitter, and retry within the agreed policy |
+| HTTP `403` | The authenticated account lacks the required entitlement | Explain that an active Wendy MCP account is required; do not retry unchanged |
+| HTTP `429` | Request rate limit or trial allowance exceeded | Inspect the machine-readable reason, honor `Retry-After`, and do not retry before the stated reset |
 | HTTP `5xx` or connection timeout | Temporary service or network failure | Retry idempotently with capped exponential backoff |
 | MCP `isError: true` | Protocol, tool name, or schema validation failure | Log the sanitized error and correct the call |
 | Wendy `status: unavailable` or `partial` | Tool executed but data or a component was unavailable | Follow per-gap `retryable` metadata |
@@ -396,9 +435,11 @@ Recommended retry behavior is exponential backoff with jitter and a fixed attemp
 `needs_input` or `permanent` results unchanged. Because calls are read-only and do not create
 orders or resources, retrying a transient failure is safe.
 
-## Partner integration requirements
+## Client integration requirements
 
-- Keep credentials server-side and rotate them through the agreed onboarding channel.
+- Use OAuth discovery, authorization code with PKCE, refresh, and revocation as published by the
+  authorization server.
+- Keep access and refresh tokens out of prompts, source code, support tickets, and logs.
 - Validate tool arguments against the live schema before calling.
 - Preserve Wendy's disclosure when showing data to an end user.
 - Do not describe modeled gamma as observed dealer inventory.
@@ -406,8 +447,8 @@ orders or resources, retrying a transient failure is safe.
 - Do not use `strike_comparison` to imply ranking, screening, or a recommendation.
 - Retain `request_id`, tool name, top-level status, and timestamps in sanitized diagnostics.
 - Do not log credentials or introduce personal information into tool arguments.
-- Agree on quotas, allowed environments, support contacts, and credential rotation separately; they
-  are intentionally not encoded in this public interface guide.
+- Treat the production endpoint and its live `tools/list` response as authoritative; staging
+  capabilities are not part of this public contract.
 
 ## Support information to provide
 
@@ -421,3 +462,9 @@ For an integration issue, provide:
 - a redacted argument shape and the client SDK name/version.
 
 Never send access tokens, API keys, raw authorization headers, or customer personal information.
+
+Public support and policy pages:
+
+- Support: <https://wendy.trade/support>
+- Privacy: <https://wendy.trade/privacy>
+- Terms: <https://wendy.trade/terms>
