@@ -351,8 +351,8 @@ Follow these conventions:
 - Use ISO `YYYY-MM-DD` for expirations.
 - Use an ISO date/time with an explicit UTC offset, or epoch time, for historical `as_of` calls.
 - Do not send undeclared properties; nested input objects use strict schemas.
-- Do not send `rh_user_id` or another customer identifier. The public gateway derives attribution
-  from the authenticated identity.
+- Do not send internal `customer_id` or `tenant_id` arguments. The public gateway derives both
+  from the authenticated identity and removes them from customer-facing schemas.
 - Do not put natural-language questions in tool arguments. The client application or agent routes
   the question to a tool and sends structured arguments.
 
